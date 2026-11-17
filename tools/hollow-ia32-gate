@@ -1,0 +1,14 @@
+#!/bin/sh
+# root helper: opens/closes the kernel's 32-bit ABI gate (sysctl abi.ia32_emulation). refcounted.
+# usage: hollow-ia32-gate on|off
+set -e
+[ "$(id -u)" = 0 ] || { echo "root only" >&2; exit 1; }
+exec 9>/run/hollow-ia32.lock
+flock 9
+n=$(cat /run/hollow-ia32.count 2>/dev/null || echo 0)
+case "$1" in
+    on)  n=$((n + 1)); echo "$n" > /run/hollow-ia32.count; echo 1 > /proc/sys/abi/ia32_emulation ;;
+    off) n=$((n - 1)); [ "$n" -lt 0 ] && n=0; echo "$n" > /run/hollow-ia32.count
+         [ "$n" -eq 0 ] && echo 0 > /proc/sys/abi/ia32_emulation ;;
+    *)   exit 2 ;;
+esac

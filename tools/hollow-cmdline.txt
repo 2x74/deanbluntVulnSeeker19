@@ -1,0 +1,1 @@
+slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 pti=on randomize_kstack_offset=on vsyscall=none debugfs=off oops=panic module.sig_enforce=1 msr.allow_writes=off iommu.strict=1 iommu.passthrough=0 efi=disable_early_pci_dma

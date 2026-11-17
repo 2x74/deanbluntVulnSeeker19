@@ -1,0 +1,11 @@
+enroll secure boot keys for maximum security?
+
+hollow will create your own platform key (PK), key exchange key (KEK) and signature database (db), sign the kernel with them, and enroll them into your firmware. after this the firmware only boots things you signed.
+
+this will stop windows 11 from booting (thankfully). it also removes microsoft's keys, so some hardware with signed option roms (some gpus and network cards) may not initialise before the os loads.
+
+if you skip this, or disable secure boot later, hollow still works, but you lose some security features: nothing checks the kernel and initramfs before they run, kernel lockdown cannot switch on automatically, and the evil maid protections in the docs do not apply.
+
+your firmware must be in setup mode (platform key cleared) for this to work. the docs walk through it for common vendors: hollow.rocks/docs/secure-boot
+
+   [ yes, enroll my keys ]   [ yes, but keep microsoft's keys ]   [ not now ]   [ read the docs ]

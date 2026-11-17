@@ -1,0 +1,51 @@
+#!/bin/sh
+# static usermode helper (CONFIG_STATIC_USERMODEHELPER_PATH). the kernel runs only this for every
+# call_usermodehelper(). $1 = program the kernel wanted. with the 0002 kernel patch, module loads
+# also carry KMOD_REQ_{PID,UID,COMM,EXE,INIT_USERNS,KTHREAD}: who asked for the module.
+#
+# policy: /etc/hollow/modules.policy, first match wins, lines: allow|deny <module-glob> <exe-glob> <uid|*>
+# default for module loads: allow root in the init userns, deny everyone else. denies are logged;
+# repeated denies from one uid raise a SUSPICIOUS log line (5 in 60s).
+POLICY=/etc/hollow/modules.policy
+STATE=/run/hollow-guard
+log() { logger -t hollow-guard -p "$1" "$2" 2>/dev/null; }
+
+case "$1" in
+    /sbin/poweroff|/sbin/reboot|/usr/bin/poweroff|/usr/bin/reboot)
+        exec "$@" ;;
+    /sbin/modprobe|/usr/bin/modprobe|/usr/sbin/modprobe)
+        for last; do :; done      # module name or alias is the last argument
+        mod=$last
+        uid=${KMOD_REQ_UID:--1}; exe=${KMOD_REQ_EXE:-}; ns=${KMOD_REQ_INIT_USERNS:-0}
+        who="module=$mod uid=$uid pid=${KMOD_REQ_PID:-?} comm=${KMOD_REQ_COMM:-?} exe=${exe:-?} init_userns=$ns kthread=${KMOD_REQ_KTHREAD:-?}"
+
+        verdict=
+        if [ -r "$POLICY" ]; then
+            while read -r action m e u rest; do
+                case $action in allow|deny) ;; *) continue ;; esac
+                case $mod in $m) ;; *) continue ;; esac
+                case $exe in $e) ;; *) continue ;; esac
+                case $uid in $u) ;; *) [ "$u" = '*' ] || continue ;; esac
+                verdict=$action; break
+            done < "$POLICY"
+        fi
+        if [ -z "$verdict" ]; then
+            if [ "$uid" = 0 ] && [ "$ns" = 1 ]; then verdict=allow; else verdict=deny; fi
+        fi
+
+        if [ "$verdict" = allow ]; then
+            log auth.info "load $who"
+            exec "$@"
+        fi
+
+        log auth.warning "DENIED $who"
+        mkdir -p "$STATE" 2>/dev/null
+        f="$STATE/deny.$uid"; now=$(date +%s)
+        echo "$now" >> "$f" 2>/dev/null
+        n=$(awk -v t="$now" 'BEGIN{c=0} $1>=t-60{c++} END{print c}' "$f" 2>/dev/null)
+        [ "${n:-0}" -ge 5 ] && log auth.alert "SUSPICIOUS: uid=$uid triggered $n denied module loads in 60s (last: $mod via ${exe:-?})"
+        exit 1 ;;
+    *)
+        log auth.warning "denied helper $1"
+        exit 1 ;;
+esac

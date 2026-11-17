@@ -1,0 +1,12 @@
+# /etc/hollow/modules.policy   (first match wins; default: root in init userns allowed, all else denied)
+# action  module-glob   exe-glob              uid
+allow     kvm*          /usr/bin/qemu-*       *
+allow     vhost*        /usr/bin/qemu-*       *
+allow     tun           /usr/bin/qemu-*       *
+deny      rds*          *                     *
+deny      sctp*         *                     *
+deny      dccp*         *                     *
+deny      tipc*         *                     *
+deny      ax25*         *                     *
+deny      net-pf-*      *                     *
+deny      nf_tables*    *                     *

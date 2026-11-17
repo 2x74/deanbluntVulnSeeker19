@@ -1,0 +1,26 @@
+#!/bin/sh
+# runit stage 1 / early service: apply the profile chosen at boot (hollow.profile=NAME on the kernel cmdline).
+# reads /etc/hollow/profiles/NAME.conf (key=value, parsed not sourced). unknown name -> default.
+# keys: description, ia32_gate=open|closed, sysctl.<dotted.name>=<value>
+DIR=/etc/hollow/profiles
+RUN=/run/hollow
+name=default
+for w in $(cat /proc/cmdline); do case $w in hollow.profile=*) name=${w#hollow.profile=} ;; esac; done
+case $name in ''|*[!a-z0-9_-]*) name=default ;; esac
+[ -r "$DIR/$name.conf" ] || name=default
+mkdir -p "$RUN"; echo "$name" > "$RUN/profile"; chmod 644 "$RUN/profile"
+logger -t hollow-profile "applying profile: $name"
+
+while IFS= read -r line; do
+    case $line in ''|'#'*) continue ;; esac
+    key=${line%%=*}; val=${line#*=}
+    case $key in
+        description) ;;
+        ia32_gate)
+            case $val in open) echo 1 > /proc/sys/abi/ia32_emulation ;; closed) echo 0 > /proc/sys/abi/ia32_emulation ;; esac ;;
+        sysctl.*)
+            k=${key#sysctl.}
+            case $k in *[!a-z0-9._-]*) continue ;; esac     # no path tricks
+            sysctl -w "$k=$val" >/dev/null 2>&1 || logger -t hollow-profile -p warning "could not set $k" ;;
+    esac
+done < "$DIR/$name.conf"

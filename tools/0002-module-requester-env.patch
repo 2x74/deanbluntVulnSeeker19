@@ -1,0 +1,135 @@
+diff --git a/kernel/module/kmod.c b/kernel/module/kmod.c
+index 25f253812..2727edeb9 100644
+--- a/kernel/module/kmod.c
++++ b/kernel/module/kmod.c
+@@ -27,6 +27,9 @@
+ #include <linux/ptrace.h>
+ #include <linux/async.h>
+ #include <linux/uaccess.h>
++#include <linux/mm.h>
++#include <linux/dcache.h>
++#include <linux/fs.h>
+ 
+ #include <trace/events/module.h>
+ #include "internal.h"
+@@ -62,21 +65,84 @@ static DEFINE_SEMAPHORE(kmod_concurrent_max, MAX_KMOD_CONCURRENT);
+ */
+ char modprobe_path[KMOD_PATH_LEN] = CONFIG_MODPROBE_PATH;
+ 
++#define KMOD_ENV_STATIC	3	/* HOME, TERM, PATH are static strings */
++#define KMOD_ENV_MAX	(KMOD_ENV_STATIC + 7)	/* + requester fields + NULL */
++
+ static void free_modprobe_argv(struct subprocess_info *info)
+ {
++	int i;
++
+ 	kfree(info->argv[3]); /* check call_modprobe() */
+ 	kfree(info->argv);
++	for (i = KMOD_ENV_STATIC; info->envp[i]; i++)
++		kfree(info->envp[i]);
++	kfree(info->envp);
+ }
+ 
+-static int call_modprobe(char *orig_module_name, int wait)
++/* keep the requester's comm printable so it cannot smuggle separators into the env */
++static void kmod_sanitize(char *s)
+ {
+-	struct subprocess_info *info;
+-	static char *envp[] = {
++	for (; *s; s++)
++		if (*s < 0x20 || *s > 0x7e || *s == '=')
++			*s = '?';
++}
++
++/*
++ * request_module() runs in the context of the task that triggered the load,
++ * so current is the requester. Tell the usermode helper who that was.
++ */
++static char **kmod_build_env(void)
++{
++	static char * const base[KMOD_ENV_STATIC] = {
+ 		"HOME=/",
+ 		"TERM=linux",
+ 		"PATH=/sbin:/usr/sbin:/bin:/usr/bin",
+-		NULL
+ 	};
++	char **envp = kzalloc(sizeof(char *) * KMOD_ENV_MAX, GFP_KERNEL);
++	char comm[TASK_COMM_LEN];
++	struct file *exe;
++	char *path = NULL, *buf;
++	int i, n = KMOD_ENV_STATIC;
++
++	if (!envp)
++		return NULL;
++	for (i = 0; i < KMOD_ENV_STATIC; i++)
++		envp[i] = base[i];
++
++	get_task_comm(comm, current);
++	kmod_sanitize(comm);
++
++	envp[n++] = kasprintf(GFP_KERNEL, "KMOD_REQ_PID=%d", task_tgid_vnr(current));
++	envp[n++] = kasprintf(GFP_KERNEL, "KMOD_REQ_UID=%u", from_kuid(&init_user_ns, current_uid()));
++	envp[n++] = kasprintf(GFP_KERNEL, "KMOD_REQ_COMM=%s", comm);
++	envp[n++] = kasprintf(GFP_KERNEL, "KMOD_REQ_INIT_USERNS=%d", current_user_ns() == &init_user_ns);
++	envp[n++] = kasprintf(GFP_KERNEL, "KMOD_REQ_KTHREAD=%d", !!(current->flags & PF_KTHREAD));
++
++	exe = get_task_exe_file(current);
++	if (exe) {
++		buf = kmalloc(PATH_MAX, GFP_KERNEL);
++		if (buf) {
++			path = d_path(&exe->f_path, buf, PATH_MAX);
++			if (!IS_ERR(path))
++				envp[n++] = kasprintf(GFP_KERNEL, "KMOD_REQ_EXE=%s", path);
++			kfree(buf);
++		}
++		fput(exe);
++	}
++
++	/* a failed kasprintf leaves a NULL hole: compact so the list ends where the data does */
++	for (i = n = KMOD_ENV_STATIC; i < KMOD_ENV_MAX; i++)
++		if (envp[i])
++			envp[n++] = envp[i];
++	while (n < KMOD_ENV_MAX)
++		envp[n++] = NULL;
++	return envp;
++}
++
++static int call_modprobe(char *orig_module_name, int wait)
++{
++	struct subprocess_info *info;
++	char **envp;
+ 	char *module_name;
+ 	int ret;
+ 
+@@ -88,6 +154,10 @@ static int call_modprobe(char *orig_module_name, int wait)
+ 	if (!module_name)
+ 		goto free_argv;
+ 
++	envp = kmod_build_env();
++	if (!envp)
++		goto free_module_name;
++
+ 	argv[0] = modprobe_path;
+ 	argv[1] = "-q";
+ 	argv[2] = "--";
+@@ -97,12 +167,19 @@ static int call_modprobe(char *orig_module_name, int wait)
+ 	info = call_usermodehelper_setup(modprobe_path, argv, envp, GFP_KERNEL,
+ 					 NULL, free_modprobe_argv, NULL);
+ 	if (!info)
+-		goto free_module_name;
++		goto free_envp;
+ 
+ 	ret = call_usermodehelper_exec(info, wait | UMH_KILLABLE);
+ 	kmod_dup_request_announce(orig_module_name, ret);
+ 	return ret;
+ 
++free_envp:
++	{
++		int i;
++		for (i = KMOD_ENV_STATIC; envp[i]; i++)
++			kfree(envp[i]);
++		kfree(envp);
++	}
+ free_module_name:
+ 	kfree(module_name);
+ free_argv:

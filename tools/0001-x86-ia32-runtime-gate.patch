@@ -1,0 +1,140 @@
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index 8623c4a5c..02bfe8ca1 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -3131,6 +3131,19 @@ config IA32_EMULATION
+ 	  64-bit kernel. You should likely turn this on, unless you're
+ 	  100% sure that you don't have any 32-bit programs left.
+ 
++config IA32_RUNTIME_GATE
++	bool "Runtime gate for the 32-bit ABI"
++	depends on IA32_EMULATION
++	default y
++	help
++	  Keep the 32-bit entry points installed but closed. While the gate
++	  (sysctl abi.ia32_emulation, 0 = closed) is closed, ELF32 binaries
++	  cannot be exec'd, and 32-bit syscalls and modify_ldt() are only
++	  honoured for tasks that already have a 32-bit address space. This
++	  stops 64-bit processes from reaching the compat syscall surface
++	  (int $0x80, far jumps to the 32-bit code segment), and lets root open
++	  the gate only while a 32-bit program is needed.
++
+ config IA32_EMULATION_DEFAULT_DISABLED
+ 	bool "IA32 emulation disabled by default"
+ 	default n
+diff --git a/arch/x86/entry/syscall_32.c b/arch/x86/entry/syscall_32.c
+index 2b15ea17b..4dcb7e0ab 100644
+--- a/arch/x86/entry/syscall_32.c
++++ b/arch/x86/entry/syscall_32.c
+@@ -8,6 +8,8 @@
+ #include <linux/entry-common.h>
+ #include <linux/nospec.h>
+ #include <linux/uaccess.h>
++#include <linux/sysctl.h>
++#include <asm/ia32.h>
+ #include <asm/apic.h>
+ #include <asm/traps.h>
+ #include <asm/cpufeature.h>
+@@ -49,8 +51,35 @@ long ia32_sys_call(const struct pt_regs *regs, unsigned int nr)
+ 	}
+ }
+ 
++#ifdef CONFIG_IA32_RUNTIME_GATE
++int ia32_runtime_gate __read_mostly;
++
++static const struct ctl_table ia32_gate_table[] = {
++	{
++		.procname	= "ia32_emulation",
++		.data		= &ia32_runtime_gate,
++		.maxlen		= sizeof(int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= SYSCTL_ZERO,
++		.extra2		= SYSCTL_ONE,
++	},
++};
++
++static int __init ia32_gate_sysctl_init(void)
++{
++	register_sysctl("abi", ia32_gate_table);
++	return 0;
++}
++late_initcall(ia32_gate_sysctl_init);
++#endif
++
+ static __always_inline int syscall_32_enter(struct pt_regs *regs)
+ {
++	/* gate closed and not a real 32-bit task: no 32-bit ABI, report an invalid syscall */
++	if (IS_ENABLED(CONFIG_IA32_RUNTIME_GATE) && unlikely(!ia32_task_allowed()))
++		return -1;
++
+ 	if (IS_ENABLED(CONFIG_IA32_EMULATION))
+ 		current_thread_info()->status |= TS_COMPAT;
+ 
+diff --git a/arch/x86/include/asm/elf.h b/arch/x86/include/asm/elf.h
+index 6c8fdc96b..2f44a1469 100644
+--- a/arch/x86/include/asm/elf.h
++++ b/arch/x86/include/asm/elf.h
+@@ -147,7 +147,7 @@ do {						\
+ 	((x)->e_machine == EM_X86_64)
+ 
+ #define compat_elf_check_arch(x)					\
+-	((elf_check_arch_ia32(x) && ia32_enabled_verbose()) ||		\
++	((elf_check_arch_ia32(x) && ia32_enabled_verbose() && ia32_exec_allowed()) ||		\
+ 	 (IS_ENABLED(CONFIG_X86_X32_ABI) && (x)->e_machine == EM_X86_64))
+ 
+ static inline void elf_common_init(struct thread_struct *t,
+diff --git a/arch/x86/include/asm/ia32.h b/arch/x86/include/asm/ia32.h
+index 9d69f3f8d..661e2d547 100644
+--- a/arch/x86/include/asm/ia32.h
++++ b/arch/x86/include/asm/ia32.h
+@@ -58,6 +58,17 @@ struct stat64 {
+ 
+ extern bool __ia32_enabled;
+ 
++#ifdef CONFIG_IA32_RUNTIME_GATE
++extern int ia32_runtime_gate;
++/* may a new ELF32 be exec'd? */
++#define ia32_exec_allowed()	(READ_ONCE(ia32_runtime_gate))
++/* may this task use the 32-bit syscall ABI / modify_ldt()? */
++#define ia32_task_allowed()	(READ_ONCE(ia32_runtime_gate) || test_thread_flag(TIF_ADDR32))
++#else
++#define ia32_exec_allowed()	(1)
++#define ia32_task_allowed()	(1)
++#endif
++
+ static __always_inline bool ia32_enabled(void)
+ {
+ 	return __ia32_enabled;
+@@ -77,6 +88,9 @@ static __always_inline bool ia32_enabled(void)
+ 
+ static inline void ia32_disable(void) {}
+ 
++#define ia32_exec_allowed()	(1)
++#define ia32_task_allowed()	(1)
++
+ #endif
+ 
+ static inline bool ia32_enabled_verbose(void)
+diff --git a/arch/x86/kernel/ldt.c b/arch/x86/kernel/ldt.c
+index 0f19ef355..5e4bbb9d2 100644
+--- a/arch/x86/kernel/ldt.c
++++ b/arch/x86/kernel/ldt.c
+@@ -25,6 +25,7 @@
+ 
+ #include <asm/ldt.h>
+ #include <asm/tlb.h>
++#include <asm/ia32.h>
+ #include <asm/desc.h>
+ #include <asm/mmu_context.h>
+ #include <asm/pgtable_areas.h>
+@@ -669,6 +670,9 @@ SYSCALL_DEFINE3(modify_ldt, int , func , void __user * , ptr ,
+ {
+ 	int ret = -ENOSYS;
+ 
++	if (!ia32_task_allowed())
++		return -ENOSYS;
++
+ 	switch (func) {
+ 	case 0:
+ 		ret = read_ldt(ptr, bytecount);

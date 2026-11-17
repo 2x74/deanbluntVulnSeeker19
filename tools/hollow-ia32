@@ -1,0 +1,11 @@
+#!/bin/sh
+# run a command with the 32-bit ABI open; the gate closes again when the command exits.
+# 32-bit processes that are already running keep working, only new ELF32 execs are blocked.
+# usage: hollow-ia32 steam | hollow-ia32 wine game.exe
+SU=${HOLLOW_SU:-doas}
+GATE=/usr/local/bin/hollow-ia32-gate
+[ $# -gt 0 ] || { echo "usage: hollow-ia32 command [args...]" >&2; exit 2; }
+$SU $GATE on || exit 1
+trap '$SU $GATE off' EXIT
+trap 'exit 130' INT TERM
+"$@"

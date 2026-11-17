@@ -1,0 +1,26 @@
+#!/bin/sh
+# /etc/grub.d/08_hollow_profile  (needs: GRUB_CMDLINE_LINUX_DEFAULT="... hollow.profile=\${hollow_profile}")
+DIR=/etc/hollow/profiles
+cat <<'GRUB'
+if [ -z "${hollow_profile}" ]; then set hollow_profile=default; fi
+if [ -z "${hollow_picked}" ]; then
+  if keystatus --shift; then
+GRUB
+for f in "$DIR"/*.conf; do
+    n=$(basename "$f" .conf)
+    case $n in ''|*[!a-z0-9_-]*) continue ;; esac
+    d=$(sed -n 's/^description=//p' "$f" | head -n1)
+    cat <<GRUB
+    menuentry "hollow profile: $n  ${d}" {
+      set hollow_profile=$n
+      set hollow_picked=1
+      export hollow_profile
+      export hollow_picked
+      configfile \${prefix}/grub.cfg
+    }
+GRUB
+done
+cat <<'GRUB'
+  fi
+fi
+GRUB
